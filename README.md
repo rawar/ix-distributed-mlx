@@ -1,20 +1,113 @@
 # ix-distributed-mlx
 
-Distributed Mandelbrot set computation using **MLX** — Apple's array framework for machine learning on Apple Silicon.
+Distributed computing examples using **MLX** — Apple's array framework for machine learning on Apple Silicon — with a focus on the [`mx.distributed`](https://ml-explore.github.io/mlx/build/html/usage/distributed.html) communication primitives and RDMA (Remote Direct Memory Access) performance.
 
-## Overview
+## Examples
 
-This repository demonstrates how to use MLX's distributed communication primitives ([`mx.distributed`](https://ml-explore.github.io/mlx/build/html/usage/distributed.html)) to split a compute-intensive workload across multiple processes.  The workload is a classic Mandelbrot set renderer implemented with vectorised MLX array operations.
+This repository contains three self-contained examples that progressively build from basic communication to compute-intensive distributed workloads:
 
-## The Program
+| Example | What it demonstrates |
+|---|---|
+| [`simple_allreduce.py`](#1-simple-all-reduce-simple_allreducepy) | Minimal all-reduce benchmark — the "hello world" of distributed computing |
+| [`distributed_matmul.py`](#2-distributed-matrix-multiplication-distributed_matmulpy) | Distributed matrix multiplication with communication benchmarking |
+| [`mpi-mandelbrot.py`](#3-distributed-mandelbrot-mpi-mandelbrotpy) | Classic Mandelbrot set renderer split across processes |
 
-`mpi-mandelbrot.py` distributes the image rows evenly across all available processes:
+---
 
+### 1. Simple All-Reduce — `simple_allreduce.py`
+
+A minimal example demonstrating RDMA benefits in distributed computing. Each node contributes a value, and all nodes receive the sum.
+
+**RDMA Advantage:**
+- Direct memory access between nodes
+- Lower latency for collective operations
+- Minimal CPU overhead
+
+**Usage:**
+```bash
+# Local testing
+mlx.launch -n 2 simple_allreduce.py
+
+# With RDMA (JACCL)
+mlx.launch --backend jaccl --hostfile jaccl-config.json simple_allreduce.py
+
+# Without RDMA (Ring)
+mlx.launch --hosts ip1,ip2 simple_allreduce.py
+```
+
+---
+
+### 2. Distributed Matrix Multiplication — `distributed_matmul.py`
+
+Demonstrates the advantages of RDMA in a fully-connected mesh cluster using MLX's distributed framework. Each node computes a portion of the result matrix, results are gathered using `all_gather`, and performance metrics show communication overhead.
+
+**RDMA Advantages Demonstrated:**
+- Zero-copy data transfer between nodes
+- Lower latency for collective operations
+- Higher bandwidth utilization in mesh topology
+- Reduced CPU overhead during communication
+
+**Usage:**
+```bash
+# Local testing (2 processes)
+mlx.launch -n 2 distributed_matmul.py
+
+# Multi-node with RDMA (JACCL backend over Thunderbolt)
+mlx.distributed_config --backend jaccl \
+  --hosts node1,node2 --over thunderbolt \
+  --auto-setup --output jaccl-config.json
+mlx.launch --backend jaccl --hostfile jaccl-config.json distributed_matmul.py
+
+# Multi-node without RDMA (Ring backend over Ethernet)
+mlx.launch --hosts ip1,ip2 distributed_matmul.py
+```
+
+---
+
+### 3. Distributed Mandelbrot — `mpi-mandelbrot.py`
+
+Distributes the image rows of a classic Mandelbrot set renderer — implemented with vectorised MLX array operations — evenly across all available processes.
+
+**How it works:**
 1. Each process initialises the distributed group via `mx.distributed.init()`.
 2. The complex-plane grid is built with `mx.linspace`.
 3. Each process extracts its row slice and computes the Mandelbrot recurrence (`z ← z² + c`) using vectorised MLX operations on the GPU.
 4. Results are combined with `mx.distributed.all_gather()`.
 5. Rank 0 reports the stats and optionally saves the result as a NumPy `.npy` file.
+
+**Usage:**
+```bash
+# Single process (no distributed communication)
+python mpi-mandelbrot.py
+
+# Multiple processes on localhost
+mlx.launch --backend mpi -n 4 -- python mpi-mandelbrot.py
+mlx.launch --backend ring -n 4 -- python mpi-mandelbrot.py
+mpirun -np 4 python mpi-mandelbrot.py
+
+# Multiple hosts
+mlx.launch --hostfile hostfile.json -- python mpi-mandelbrot.py
+```
+
+All `mx.distributed` operations are no-ops when the group size is 1 — the program works identically in single-process mode.
+
+### How the Distributed Mandelbrot Works
+
+```
+┌───────────────────────────────────────────────┐
+│                  Full Image                    │
+│  ┌───────┬───────┬───────┬───────┬───────┐   │
+│  │Rank 0 │Rank 1 │Rank 2 │Rank 3 │Rank 4 │   │
+│  │ chunk │ chunk │ chunk │ chunk │ chunk │   │
+│  └───────┴───────┴───────┴───────┴───────┘   │
+│        ▲                                      │
+│        │            all_gather                 │
+│  ┌───────┐  ┌───────┐  ┌───────┐             │
+│  │Rank 0 │  │Rank 1 │  │Rank 2 │  ...         │
+│  │compute│  │compute│  │compute│              │
+│  └───────┘  └───────┘  └───────┘             │
+└───────────────────────────────────────────────┘
+```
 
 ## Requirements
 
@@ -24,55 +117,6 @@ This repository demonstrates how to use MLX's distributed communication primitiv
 
 For MPI backend specifically:
 - OpenMPI (`brew install openmpi` on macOS)
-
-## Usage
-
-### Single process (no distributed communication)
-
-```bash
-python mpi-mandelbrot.py
-```
-
-All `mx.distributed` operations are no-ops when the group size is 1 — the program works identically.
-
-### Multiple processes on localhost
-
-```bash
-# MLX launcher with MPI backend
-mlx.launch --backend mpi -n 4 -- python mpi-mandelbrot.py
-
-# MLX launcher with ring backend (TCP, no MPI needed)
-mlx.launch --backend ring -n 4 -- python mpi-mandelbrot.py
-
-# Direct mpirun
-mpirun -np 4 python mpi-mandelbrot.py
-```
-
-### Multiple hosts
-
-Create a JSON hostfile (see [MLX docs](https://ml-explore.github.io/mlx/build/html/usage/launching_distributed.html)) and launch:
-
-```bash
-mlx.launch --hostfile hostfile.json -- python mpi-mandelbrot.py
-```
-
-## How the Distributed Mandelbrot Works
-
-```
-┌───────────────────────────────────────────────┐
-│                  Full Image                    │
-│  ┌───────┬───────┬───────┬───────┬───────┐    │
-│  │Rank 0 │Rank 1 │Rank 2 │Rank 3 │Rank 4 │    │
-│  │chunk  │chunk  │chunk  │chunk  │chunk  │    │
-│  └───────┴───────┴───────┴───────┴───────┘    │
-│                    ▲                           │
-│                    │ all_gather                │
-│  ┌───────┐  ┌───────┐  ┌───────┐              │
-│  │Rank 0 │  │Rank 1 │  │Rank 2 │  ...         │
-│  │compute│  │compute│  │compute│              │
-│  └───────┘  └───────┘  └───────┘              │
-└───────────────────────────────────────────────┘
-```
 
 ## References
 
